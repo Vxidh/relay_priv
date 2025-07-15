@@ -1,0 +1,1167 @@
+package Qsome;
+
+import static org.jcodec.common.model.ColorSpace.RGB;
+
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.event.KeyEvent;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.net.SocketAddress;
+import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Stack;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.imageio.ImageIO;
+
+import org.jcodec.api.awt.AWTSequenceEncoder;
+import org.jcodec.common.io.NIOUtils;
+import org.jcodec.common.io.SeekableByteChannel;
+import org.jcodec.common.model.Picture;
+import org.jcodec.common.model.Rational;
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import net.schmizz.sshj.SSHClient;
+import net.schmizz.sshj.common.IOUtils;
+import net.schmizz.sshj.connection.channel.direct.Session;
+import net.schmizz.sshj.connection.channel.direct.Session.Command;
+
+
+public class Node {
+	private final String name;
+	private String IPAddress;
+	private final String botName;
+	private final String platform;
+	private final String version;
+	final String qsomeVersion;
+	private JSONArray clientapps;
+	private final String batchInit;
+	private final String batchClosure;
+	public Node(String botName, JSONObject nodeAttrs) {
+		this.name = nodeAttrs.getString("name");
+		this.IPAddress = nodeAttrs.getString("ip_address").trim();
+		this.botName = botName;
+		this.platform = nodeAttrs.getString("platform");
+		this.version = nodeAttrs.optString("version");
+		this.qsomeVersion = nodeAttrs.optString("qsomeversion");
+	    this.clientapps = nodeAttrs.getJSONArray("clientapps");
+	    this.batchClosure = nodeAttrs.optString("batchclosure");
+	    this.batchInit = nodeAttrs.optString("batchinit");
+	    this.runBatchCommands(batchInit);
+	}
+	
+	private void runBatchCommands(String cmdStr) {
+		if (cmdStr == null || cmdStr.length()==0)
+			return;
+	    String cmds[] = cmdStr.split("\\r?\\n");
+		for (String cmd :cmds) {
+			cmd = cmd.trim();
+			if (0 < cmd.length()) {
+				if (cmd.toUpperCase().startsWith("ADMIN ")) {
+					cmd = cmd.substring(6);
+					this.shellCommandAdmin(cmd);
+				} else if (cmd.toUpperCase().startsWith("ASYNC ")){
+					cmd = cmd.substring(6);
+					this.action().launchCmd(cmd);
+				} else if (! (cmd.equalsIgnoreCase("None") || cmd==null || cmd.length()==0) ){
+					String[] c = {cmd};
+					this.action().runCmd(c);
+				}
+				try {
+					Thread.sleep(4000);
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				};
+			}
+		}
+	}
+	
+	public String IPAddress() {
+		return this.IPAddress;
+	}
+	
+	void setIPAddress(String ipAddress) {
+		this.IPAddress = ipAddress;
+	}
+
+	String platform() {
+		return this.platform;
+	}
+	
+	String platformVersion() {
+		return this.version;
+	}
+	
+	String botName() {
+		return this.botName;
+	}
+	
+	String[] apps() {
+		String[] ret = new String[clientapps.length()];
+		for (int i=0; i < clientapps.length(); i++) {
+			ret[i] = clientapps.getString(i);
+		}
+		return ret;
+	}
+	
+	public void stop() {
+		this.runBatchCommands(batchClosure);
+		sshClientAdminStop();
+		if (this.screen!=null)
+			screen.close();
+		if (this.action!=null)
+			action.close();
+	}
+
+	public String shellCommand(String cmd) {
+		// For backward compatibility
+		String[] cmds = {cmd};
+		String[] ret = action().runCmd(cmds);
+		return String.join("\n", ret);
+	}
+	public String[] commands(String[] cmds) {
+		return action().runCmd(cmds);
+	}
+	
+	private SSHClient sshClientAdmin = null;
+	private SSHClient sshClientAdmin() throws Exception{
+		if (this.sshClientAdmin==null) {
+			this.sshClientAdmin= new SSHClient();
+			System.out.println("Current user:" + System.getProperty("user.name"));
+
+			//			this.sshClientAdmin.addHostKeyVerifier("10:8e:ea:8c:10:2f:c5:ec:f7:3d:a1:8a:b0:b5:c4:9d");
+			//			this.sshClientAdmin.addHostKeyVerifier("df:9e:a3:7a:37:f0:c0:e6:ae:d1:f1:8d:cf:fb:cc:bb");
+			//			String hostKey = Qsome.config("NodeHostKeyVerifier");
+			String knownHost = Qsome.config("BatchKnownHosts");
+			if ((knownHost == null) || (knownHost.isEmpty())) {
+				System.out.println("KnownHosts: default");
+				this.sshClientAdmin.loadKnownHosts();
+			} else {
+				System.out.println("KnownHosts: "+knownHost);
+				this.sshClientAdmin.loadKnownHosts(new File(knownHost));
+			}
+			this.sshClientAdmin.setTimeout(60000);
+			this.sshClientAdmin.connect(this.IPAddress);
+
+			String pvtKey   = Qsome.config("BatchPvtKeyPath");
+			System.out.println("BatchPvtKeyPath:"+pvtKey);
+			this.sshClientAdmin.authPublickey(Qsome.config("BatchNodeAdministrator"), pvtKey);
+		}
+		return this.sshClientAdmin;
+	}
+
+	private void sshClientAdminStop() {
+		if (this.sshClientAdmin!=null) {
+			try {
+				this.sshClientAdmin.disconnect();
+			} catch (Exception e) {e.printStackTrace();}
+			finally {
+				this.sshClientAdmin = null;
+			}
+		}
+	}
+
+	String shellCommandAdmin(String cmd) {
+		System.out.println("shellCommandAdmin "+ this.IPAddress +" : "+cmd);
+		String stdOut=null;
+		try{
+			final Session session_to_exe_cmd = this.sshClientAdmin().startSession();
+			final Command exe_command = session_to_exe_cmd.exec(cmd);
+			stdOut = IOUtils.readFully(exe_command.getInputStream()).toString();
+			System.out.println("stdOut:"+stdOut);
+			String stdErr = IOUtils.readFully(exe_command.getErrorStream()).toString();
+			System.out.println("stdErr"+stdErr);
+			session_to_exe_cmd.close();
+		}
+		catch (Exception e) {
+			e.printStackTrace();
+		}
+		finally {
+			this.sshClientAdminStop();
+		}
+		return stdOut;
+	}
+
+	Screen screen = null;
+	Screen screen() {
+		if (screen == null) {
+//		    this.runBatchCommands(batchInit);
+			screen = new Screen(this);
+		}
+		return screen;
+	}
+	Actions action = null;
+	Actions action() {
+		if (action == null) {
+			action = new Actions(this);
+		}
+		return action;
+	}
+
+	public void launchApp(String cmd) { // Run UI application
+		action().launchCmd(cmd);
+	}
+
+	public void startRec(String fileName) {
+		if (! this.platform.equalsIgnoreCase("android")) {
+			screen().startRec(fileName);
+			System.out.println("Start recording: "+fileName);
+		}
+	}
+	public void stopRec() {
+		if (this.screen!=null)
+			screen.stopRec();
+	}
+	public void dropRec() {
+		if (this.screen!=null)
+			screen.dropRec();
+	}
+	public BufferedImage screenShot() throws Exception {
+		return screen().screenshotBI();
+	}
+//	public byte[] screenShotBA() throws Exception {
+//		return screen().screenShotBA();
+//	}
+
+	public void mouseClick(int x, int y, int button){
+		action().mouseClick(x, y, button);
+	}
+	public void mouseDoubleClick(int x, int y, int button){
+		action().mouseDoubleClick(x, y, button);
+	}
+	public void keyEnter(int keyCode){
+		action().keyEnter(keyCode);
+	}
+	public void keyEnter(char letter){
+		action().keyEnter(letter);
+	}
+	public void keyDown(int keyCode){
+		action().keyDown(keyCode);
+	}
+	public void keyUp(){
+		action().keyUp();
+	}
+	public void touch(String[] stepList) {
+		action().touch(stepList);
+	}
+	public String copyClipboard() {
+		return action().copyClipboard();
+	}
+	public void typeText(String text) {
+		action().typeText(text);
+	}
+	public void releaseDownKeys() {
+		action().releaseDownKeys();
+	}
+	public byte[] getFile(String directory, String fileName, int timeout) {
+		return action().fileFromNode(directory, fileName, timeout);
+	}
+	public String fileToNode(String fileName) {
+		String contentDir = Qsome.config("LocalClientDir") + File.separator + "content";
+		File f = new File(contentDir, fileName);
+		return action().fileToNode(f);
+	}
+	public String fileToNode(File file) {
+		return action().fileToNode(file);
+	}
+	public String api(String url, String method, String headers, String body, String filePath) {
+		return action().api(url, method, headers, body, filePath);
+	}
+//	private static ArrayList<String> driversUpdated = new ArrayList<String>();
+//	void browserUpdate(String browserName) {
+//		if ( ! driversUpdated.contains(browserName)) {
+//			action().browserUpdate(browserName);
+//			driversUpdated.add(browserName);
+//		}
+//	}
+}
+
+class Screen {
+	private final int END = 0;
+	private final int SCREENSHOT = -2;
+	private final Node node;
+//	private final String botName;
+//	private final String ipAddress;
+	private final Boolean shouldRecord;
+	Screen(Node n) {
+		node = n;
+//		ipAddress = ipAddr;
+//		botName = bName;
+//		startWatchingNode();
+//		shouldRecord = shouldRecord();
+//		if (shouldRecord) {
+//			 wait for observer to initialise
+//			for (int i=0;i<100;i++) {
+//				if (watchingNode) {
+//					startRecorder();
+//					return;
+//				} else {
+//					try {Thread.sleep(100);} catch (InterruptedException e) {}
+//				}
+//			}
+//		}
+		shouldRecord = shouldRecord();
+		startWatching();
+	}
+	private boolean shouldRecord() {
+//		String configRetentionPeriod = Qsome.config("RetentionDays.mp4");
+//		if (configRetentionPeriod != null) {
+//			try {
+//				int retentionPeriod = Integer.parseInt(configRetentionPeriod);
+//				shouldRecord = (0 < retentionPeriod);
+//			} catch (Exception e) {}
+//		}
+//		return shouldRecord;
+		return true;
+	}
+
+	public void close() {
+		System.out.println("Node stopping: " + node.IPAddress());
+		if (this.recordingIsOn) {
+			this.stopRecording = true;
+			for (int i=0; this.recordingIsOn && i<20 ; i++) {
+				try {Thread.sleep(500);} catch (InterruptedException e) {}
+			}
+		}
+		this.keepWatching = false;
+		if (this.nodeWatch!=null) {
+			try {
+				nodeWatch.join(20000);
+				System.out.println("Node cleanly stopped: " + node.IPAddress());
+			} catch (InterruptedException e1) {
+				e1.printStackTrace();
+				System.out.println("Node stopped: " + node.IPAddress());
+			}
+		}
+	}
+
+	
+	private AtomicReference<BufferedImage> screenshotBI = new AtomicReference<BufferedImage>();
+	public BufferedImage screenshotBI() throws IOException {
+		//  First wait for the thread to clear off old screenshot if it is still there
+		for (int i=0; i<50 && screenshotShared ;i++) {
+			pause(100);
+		}
+		// request for screenshot
+		getScreenshot = true;
+		// wait for the thread to put the screenshot
+		for (int i=0; i<50 && !screenshotShared ;i++) {
+			pause(100);
+		}
+		BufferedImage ret = screenshotBI.get();
+		getScreenshot = false;
+		return ret;
+	}
+//	public String screenShot64() throws Exception {
+//		// Not tested
+//		byte[] ssBytes = getScreenShotBytes(); 
+//		String imgString = Base64.getEncoder().encodeToString(ssBytes);
+//		return imgString;
+//	}
+
+	Thread nodeWatch = null;
+	// changed in main thread, read in nodeWatch thread;
+	volatile boolean getScreenshot = false;
+	volatile boolean startRecording = false;
+	volatile boolean stopRecording = true;
+	volatile String videoFilePath = null;
+	volatile boolean keepWatching = true;
+
+	// changed in nodeWatch thread, read in main thread;
+	volatile boolean screenshotShared = false;
+	volatile boolean recordingIsOn = false;
+
+	private void startWatching() {
+		if (this.nodeWatch == null) {
+			this.nodeWatch = new Thread() {
+				public void run(){
+					System.out.println("Node-watch starting");
+					final int fps = 2;
+					final int frameDuration = (int) (1000/fps);
+//					final double scale = 0.68;
+					final double scale = 0.72;
+					
+					int videoWidth = -1, videoHeight = -1;
+					Graphics2D grph = null;
+		    		BufferedImage resized = null;
+    				QSSequenceEncoder enc = null;
+					File vFile = null;
+					boolean keepRecording = false;
+					recordingIsOn = false;
+					screenshotShared = false;
+    				try {
+		    			boolean isConnected = this.initSocket(5900);
+		    			if (isConnected) {
+	    					requestNextScreenshot();
+		    			}
+		    			while ((keepWatching || keepRecording) && isConnected) {
+//		    			while (isConnected && keepWatching) {
+	    					long frameStart = System.currentTimeMillis();
+	    					receiveScreenshot();
+	    					requestNextScreenshot();
+	    					if (getScreenshot) {
+	    						if (!screenshotShared) {
+		    						screenshotBI.set(ssBI());
+		    						screenshotShared = true;
+	    						}
+	    					} else {
+	    						if (screenshotShared) {
+		    						// main thread has picked up the previous screenshot
+		    						screenshotBI.set(null);
+		    						screenshotShared = false; // ready for next
+	    						}
+	    					}
+					        if (startRecording && !keepRecording) {
+			    				vFile = new File(videoFilePath);
+		    					enc = QSSequenceEncoder.createSequenceEncoder(vFile, fps);
+								keepRecording = true;
+								recordingIsOn = true;
+					        }
+							if (keepRecording) {
+		    					try {
+			    					BufferedImage original = ssBI();
+		    						if (grph == null) {
+		    							videoWidth = ((int)(scale * original.getWidth(null)/2))*2; // must be even
+		    							videoHeight = ((int)(scale * original.getHeight(null)/2))*2;// must be even
+		    							resized = new BufferedImage(videoWidth, videoHeight, BufferedImage.TYPE_3BYTE_BGR);
+		    							grph = resized.createGraphics();
+			    						grph.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+		    						}
+		    						grph.drawImage(original, 0, 0, videoWidth, videoHeight, 0, 0, original.getWidth(),
+		    						    original.getHeight(), null);
+		    						enc.encodeImage(resized);
+		    					} catch (IOException e) {
+		    						e.printStackTrace();
+		    					}
+							}
+							if (stopRecording && keepRecording) {
+								if (enc!=null) {
+			    					System.out.println("Finishing:" + vFile.getAbsolutePath());
+			    					enc.finish();
+			    					enc = null;
+								}
+								keepRecording = false;
+								recordingIsOn = false;
+							}
+							waitTillNextFrame(frameStart, frameDuration);
+	    				}
+    				} catch (IOException e) { // catch exceptions from encoder while creating / finishing
+    					enc = null;
+    					e.printStackTrace();
+    				} finally {
+			    		if (grph!=null) {
+			    			try {
+				    			grph.dispose();
+				    			grph=null;
+			    			} catch (Exception e1) {e1.printStackTrace();}
+			    		}
+		    			if (req!=null) {
+		    				stopNodeWatch();
+		    				try {sleep(2000);} catch (Exception e) {}
+		    			}
+		    			closeSocket();
+    				}
+		    	}
+
+		        private void requestNextScreenshot() {
+					try {
+						req.writeInt(SCREENSHOT);
+						req.flush();
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+		        }
+		        byte[] ssBytes = null;
+		        private void receiveScreenshot() throws IOException {
+		        	// read the bytes from the socket and keep. Will be used only when a screenshot() is needed.
+		        	int length = resp.readInt();
+		        	if (length > 0) {
+		        		ssBytes = new byte[length];
+		        		resp.readFully(ssBytes);
+		        		ssBI = null; // so that new bytes will be used
+//		        		System.out.println("SCREENSHOT");
+		        	}
+		        }
+		        private BufferedImage ssBI = null;
+		        private BufferedImage ssBI() throws IOException {
+		        	if (ssBI == null && ssBytes != null) {
+    					ByteArrayInputStream bais = new ByteArrayInputStream(ssBytes);
+    					ssBI = ImageIO.read(bais);
+    					bais.close();
+    				}
+		        	return ssBI;
+		        }
+		    	private void waitTillNextFrame(Long frameStartTime, int frameDuration) {
+		    		long waitTime = (frameStartTime + frameDuration) - System.currentTimeMillis();
+		    		if (0<waitTime) {
+		    			try {Thread.sleep(waitTime);} catch (InterruptedException e) {}
+		    		}
+		        }
+
+				Socket obs = null;
+	    		DataOutputStream req = null;
+				private DataInputStream resp = null;
+		    	private boolean initSocket(int port) throws UnknownHostException, IOException {
+		    		obs = new Socket();
+		    		SocketAddress socketAddress = new InetSocketAddress(node.IPAddress(), port);
+		    		obs.connect(socketAddress, 30000);
+		    		obs.setSoTimeout(120000);
+					req = new DataOutputStream(obs.getOutputStream());
+					resp = new DataInputStream(obs.getInputStream());
+		    		return auth();
+		    	}
+		    	private boolean auth() {
+					boolean isVersionOK = false;
+					try {
+						String pwd = resp.readUTF();
+			    		if (pwd.equals("qsome")) {
+				    		req.writeUTF(node.botName());
+				    		req.writeUTF(node.qsomeVersion);
+				    		req.writeInt(0); // delay
+				    		req.flush();
+				    		isVersionOK = resp.readBoolean();
+				    		if (! isVersionOK) {
+					    		isVersionOK = jarFileToNode(node.qsomeVersion);
+				    		}
+			    		}
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+					return isVersionOK;
+		    	}
+		    	boolean jarFileToNode(String version) {
+		    		boolean isVersionOK = false;
+		    		String fName = "QsomeNodeExec-"+version+".jar";
+		    		File jarFile = new File(fName);
+		    		try (FileInputStream fis = new FileInputStream(jarFile)) {
+		    			req.writeBoolean(true);
+		    			req.writeUTF(jarFile.getName());
+		    			req.writeLong(jarFile.length());
+		    			byte[] buffer = new byte[8192];
+		    			int bytesRead;
+		    			while (0 <= (bytesRead = fis.read(buffer))) {
+		    				req.write(buffer, 0, bytesRead);
+		    			}
+		    			req.flush();
+		        		isVersionOK = resp.readBoolean();
+		        		if (! isVersionOK) {
+		        			String except = resp.readUTF();
+		        			userLog.log(except);
+		        		}
+		        		userLog.log("Qsome upgraded on the node");
+		    		} catch (IOException e) {
+		    			e.printStackTrace();
+		    			try {
+							req.writeBoolean(false);
+							req.flush();
+			        		userLog.log("Desired version of Qsome not found");
+						} catch (IOException e1) {
+							e1.printStackTrace();
+						}
+		    		}
+		    		return isVersionOK;
+		    	}
+		    	private void closeSocket() {
+	    			if (obs!=null) {
+						try {
+		    				System.out.println("socket ending");
+							obs.close();
+		    				System.out.println("socket closed");
+						} catch (IOException e) {
+							e.printStackTrace();
+						}
+	    			}
+		    	}
+		    	private void stopNodeWatch() {
+	    			try {
+	    				System.out.println("Node end started");
+	    				req.writeInt(END);
+	    				req.flush();
+	    				resp.readBoolean();
+	    				System.out.println("Node end confirmed");
+	    			} catch (Exception e) {
+	    				e.printStackTrace();
+	    			}
+		    	}
+			};
+			this.nodeWatch.start();
+		}
+	}
+	
+	void startRec(String filePath) {
+		if (!shouldRecord) return;
+		waitForRecordingToStop();
+		this.videoFilePath = filePath;
+		startRecording = true;
+		for (int i=0; i<50 ;i++) {
+			if (recordingIsOn) {
+				startRecording = false;
+				break;
+			} else {
+				try {Thread.sleep(200);} catch (InterruptedException e) {}
+			}
+		}
+	}
+	void stopRec() {
+		stopRecording = true;
+	}
+	void dropRec() {
+		if (!shouldRecord) return;
+		waitForRecordingToStop();
+		File f = new File(videoFilePath);
+		f.delete();
+	}
+	private void waitForRecordingToStop() {
+		stopRecording = true;
+		for (int i=0; i<50 && recordingIsOn ;i++) {
+			pause(200);
+		}
+		stopRecording = false;
+	}
+	private void pause(int ms) {
+		try {Thread.sleep(ms);} catch (InterruptedException e) {}
+	}
+}
+
+class QSSequenceEncoder extends AWTSequenceEncoder {
+
+    public QSSequenceEncoder(SeekableByteChannel out, Rational fps) throws IOException {
+        super(out, fps);
+    }
+    
+    public static QSSequenceEncoder createSequenceEncoder(File out, int fps) throws IOException {
+        return new QSSequenceEncoder(NIOUtils.writableChannel(out), Rational.R(fps, 1));
+    }
+
+    public void encodeImage(BufferedImage bi) throws IOException {
+        encodeNativeFrame(fromBufferedImageRGB(bi));
+    }
+
+    private static Picture fromBufferedImageRGB(BufferedImage src) {
+        Picture dst = Picture.create(src.getWidth(), src.getHeight(), RGB);
+        fromBufferedImage(src, dst);
+        return dst;
+    }
+
+    private static void fromBufferedImage(BufferedImage src, Picture dst) {
+        byte[] dstData = dst.getPlaneData(0);
+        byte[] srcData = ((DataBufferByte)src.getRaster().getDataBuffer()).getData();
+        for (int i=0;i<(srcData.length/3);i++) {
+        	int j=i*3;
+        	dstData[j] = (byte) (srcData[j+2]-128);
+        	dstData[j+1] = (byte) (srcData[j+1]-128);
+        	dstData[j+2] = (byte) (srcData[j]-128);
+        }
+//        int off = 0;
+//        for (int i = 0; i < src.getHeight(); i++) {
+//            for (int j = 0; j < src.getWidth(); j++) {
+//                int rgb1 = src.getRGB(j, i);
+//                dstData[off++] = (byte) (((rgb1 >> 16) & 0xff) - 128);
+//                dstData[off++] = (byte) (((rgb1 >> 8) & 0xff) - 128);
+//                dstData[off++] = (byte) ((rgb1 & 0xff) - 128);
+//            }
+//        }
+    }
+
+}
+
+class Actions {
+	private final Node node;
+
+	private Socket ctrl = null;
+	private DataOutputStream request;
+	private DataInputStream response;
+	
+	private boolean on = false;
+
+	Actions(Node n) {
+		node = n;
+		try {
+			ctrl = this.getSocket(5901);
+			request = new DataOutputStream(ctrl.getOutputStream());
+			response = new DataInputStream(ctrl.getInputStream());
+			on = auth();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
+	private Socket getSocket(int port) throws UnknownHostException, IOException {
+		Socket sc = new Socket();
+		SocketAddress socketAddress = new InetSocketAddress(this.node.IPAddress(), port);
+		sc.connect(socketAddress, 30000);
+		sc.setSoTimeout(120000);
+		return sc;
+	}
+	
+	private void write(int data) {
+		write(data, false);
+	}
+	private void write(int data, boolean shouldFlush) {
+		try {
+			request.writeInt(data);
+			if (shouldFlush) request.flush();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+	private void write(String data) {
+		write(data, false);
+	}
+	private void write(String data, boolean shouldFlush) {
+		try {
+			data = (data==null) ? "" : data;
+			request.writeUTF(data);
+			if (shouldFlush) request.flush();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+	private void write(long data) {
+		write(data, false);
+	}
+	private void write(long data, boolean shouldFlush) {
+		try {
+			request.writeLong(data);
+			if (shouldFlush) request.flush();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+	private void write(boolean data) {
+		write(data, false);
+	}
+	private void write(boolean data, boolean shouldFlush) {
+		try {
+			request.writeBoolean(data);
+			if (shouldFlush) request.flush();
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+	
+	private String readString() {
+		String ret = null;
+		try {
+			boolean isLongString = readBoolean();
+			if (isLongString) {
+				int len = readInt();
+				try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+					byte[] bytes = new byte[8192];
+					long bytesRemaining = len;
+					int bytesRead;
+					while ( 0 < bytesRemaining && 0 <= (bytesRead = response.read(bytes))) {
+						bytesRemaining -= bytesRead;
+						baos.write(bytes, 0, bytesRead);
+					}
+				    baos.flush();
+				    ret = baos.toString(StandardCharsets.UTF_8);
+				} catch (IOException e) {
+					e.printStackTrace();
+				}
+			} else {
+				ret = response.readUTF();
+			}
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		return ret;
+	}
+
+	private int readInt() {
+		Integer ret = null;
+		try {
+			ret = response.readInt();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		return ret;
+	}
+	private long readLong() {
+		Long ret = null;
+		try {
+			ret = response.readLong();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		return ret;
+	}
+	private boolean readBoolean() {
+		Boolean ret = null;
+		try {
+			ret = response.readBoolean();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		return ret;
+	}
+	
+//	private boolean auth() {
+//		String pwd = readString();
+//		if (pwd.equals("qsome")) {
+//    		write(node.botName());
+//    		write(5); // delay
+//    		write(node.qsomeVersion, true);
+//    		boolean isVersionOK = readBoolean();
+//    		if (! isVersionOK) {
+//	    		jarFileToNode(node.qsomeVersion);
+//	    		isVersionOK = readBoolean();
+//    			if (! isVersionOK) {
+//    				String except = readString();
+//    				userLog.log(except);
+//    				return false;
+//    			}
+//    		}
+//		}
+//		return true;
+//	}
+	
+	private boolean auth() {
+		boolean isVersionOK = false;
+			try {
+				String pwd = response.readUTF();
+				if (pwd.equals("qsome")) {
+		    		write(node.botName());
+		    		write(node.qsomeVersion);
+		    		write(3, true); // delay
+		    		isVersionOK = readBoolean();
+		    		if (! isVersionOK) {
+			    		isVersionOK = jarFileToNode(node.qsomeVersion);
+		    		}
+				}
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		return isVersionOK;
+	}
+
+	void close() {
+		on = false;
+		if (ctrl != null) {
+			if (request != null) {
+				write(END, true);
+				try {Thread.sleep(2000);} catch (Exception e) {}
+			}
+			try {
+				ctrl.close();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		}
+	}
+
+	private final static int END = 0;
+	private final static int KEY_DOWN = -3;
+	private final static int KEY_UP = -4;
+	private final static int KEY_ENTER = -6;
+	private final static int KEY_TEXT = -7;
+
+	private final static int MOUSE_CLICK_POINT = -12;
+	private final static int MOUSE_DOUBLE_CLICK_POINT = -15;
+	private final static int TOUCH = -16;
+	private final static int COPY = -14;
+
+	private final static int FILE_FROM_BOT = -9;
+	private final static int FILE_TO_BOT = -10;
+
+	private final static int CMD = -11;
+	private final static int APP = -17;
+	
+	private final static int API = -18;
+	private final static int BROWSER_UPDATE = -19;
+
+//	private final static int SEE_YOU_LATER = -13;
+
+	void mouseClick(int x, int y, int button) {
+		if (!on) return;
+		write(MOUSE_CLICK_POINT);
+		write(x);
+		write(y);
+		write((button==3) ? 4 : 16, true);
+//		system.out.println("mouseClick triggered");
+		readBoolean();
+		System.out.println("mouseClick completed");
+	}
+
+	void mouseDoubleClick(int x, int y, int button) {
+		if (!on) return;
+		write(MOUSE_DOUBLE_CLICK_POINT);
+		write(x);
+		write(y);
+		write((button==3) ? 4 : 16, true);
+//		System.out.println("mouseDoubleClick triggered");
+		readBoolean();
+		System.out.println("mouseDoubleClick completed");
+	}
+
+//	private static final Map<Character, Integer> SPLCHARS = new ConcurrentHashMap<Character, Integer>();
+	private static final Map<Character, Integer> SPLCHARS = new HashMap<Character, Integer>();
+	static {
+		SPLCHARS.put('-', KeyEvent.VK_MINUS);
+		SPLCHARS.put('=', KeyEvent.VK_EQUALS);
+		SPLCHARS.put('[', KeyEvent.VK_OPEN_BRACKET);
+		SPLCHARS.put(']', KeyEvent.VK_CLOSE_BRACKET);
+		SPLCHARS.put('\\', KeyEvent.VK_BACK_SLASH);
+		SPLCHARS.put(';', KeyEvent.VK_SEMICOLON);
+		SPLCHARS.put('\'', KeyEvent.VK_QUOTE);
+		SPLCHARS.put(',', KeyEvent.VK_COMMA);
+		SPLCHARS.put('.', KeyEvent.VK_PERIOD);
+		SPLCHARS.put('/', KeyEvent.VK_SLASH);
+	}
+//	private static final Map<Character, Integer> SPLSHIFTCHARS = new ConcurrentHashMap<Character, Integer>();
+	private static final Map<Character, Integer> SPLSHIFTCHARS = new HashMap<Character, Integer>();
+	static {
+		SPLSHIFTCHARS.put('!', KeyEvent.VK_1);
+		SPLSHIFTCHARS.put('@', KeyEvent.VK_2);
+		SPLSHIFTCHARS.put('#', KeyEvent.VK_3);
+		SPLSHIFTCHARS.put('$', KeyEvent.VK_4);
+		SPLSHIFTCHARS.put('%', KeyEvent.VK_5);
+		SPLSHIFTCHARS.put('^', KeyEvent.VK_6);
+		SPLSHIFTCHARS.put('&', KeyEvent.VK_7);
+		SPLSHIFTCHARS.put('*', KeyEvent.VK_8);
+		SPLSHIFTCHARS.put('(', KeyEvent.VK_9);
+		SPLSHIFTCHARS.put(')', KeyEvent.VK_0);
+		SPLSHIFTCHARS.put('_', KeyEvent.VK_MINUS);
+		SPLSHIFTCHARS.put('+', KeyEvent.VK_EQUALS);
+		SPLSHIFTCHARS.put('{', KeyEvent.VK_OPEN_BRACKET);
+		SPLSHIFTCHARS.put('}', KeyEvent.VK_CLOSE_BRACKET);
+		SPLSHIFTCHARS.put('|', KeyEvent.VK_BACK_SLASH);
+		SPLSHIFTCHARS.put(':', KeyEvent.VK_SEMICOLON);
+		SPLSHIFTCHARS.put('\"', KeyEvent.VK_QUOTE);
+		SPLSHIFTCHARS.put('<', KeyEvent.VK_COMMA);
+		SPLSHIFTCHARS.put('>', KeyEvent.VK_PERIOD);
+		SPLSHIFTCHARS.put('?', KeyEvent.VK_SLASH);
+	}
+
+	void keyEnter(int keyCode) {
+		if (!on) return;
+		write(KEY_ENTER);
+		write(keyCode, true);
+//		System.out.println("keyEnter triggered:" + keyCode);
+		readBoolean();
+		System.out.println("keyEnter completed:" + keyCode);
+	}
+
+	void keyEnter(char letter) {
+		if (!on) return;
+		if (Character.isLetterOrDigit(letter)
+				|| SPLCHARS.containsKey(letter)
+				|| SPLSHIFTCHARS.containsKey(letter)) {
+			typeText(""+letter);
+		}
+	}
+
+	void keyDown(int keyCode) {
+		if (!on) return;
+		write(KEY_DOWN);
+		write(keyCode, true);
+		keysDown.add(keyCode);
+//		System.out.println("keyDown triggered:"+keyCode);
+		readBoolean();
+		System.out.println("keyDown completed:"+keyCode);
+	}
+
+	void keyUp() {
+		if (!on) return;
+		int keyCode = keysDown.pop();
+		write(KEY_UP);
+		write(keyCode, true);
+//		System.out.println("keyUp triggered:"+keyCode);
+		readBoolean();
+		System.out.println("keyUp completed:"+keyCode);
+	}
+
+	Stack<Integer> keysDown = new Stack<Integer>();
+	void releaseDownKeys() {
+		if (!on) return;
+		while (! keysDown.isEmpty()) {
+			keyUp();
+		}
+	}
+	void typeText(String text) {
+		if (!on) return;
+		write(KEY_TEXT);
+		write(text, true);
+//		System.out.println("typeText triggered:" + text);
+		readBoolean();
+		System.out.println("typeText completed:" + text);
+	}
+
+	void touch(String[] stepList) {
+		if (!on) return;
+		write(TOUCH);
+		write(String.join(" ", stepList), true);
+		readBoolean();
+	}
+
+	String copyClipboard() {
+		if (!on) return "";
+		write(COPY, true);
+		System.out.println("Starting copy");
+		String strClipboard = readString();
+		System.out.println("Copy over: "+strClipboard);
+		return strClipboard;
+	}
+	String[] runCmd(String[] cmds) {
+		if (!on) return null;
+		userLog.log("Executing shell commands:");
+		write(CMD);
+		write(cmds.length);
+		for (int i=0; i<cmds.length ;i++) {
+			write(cmds[i], (i == cmds.length-1));
+		}
+		readBoolean();
+//		int stdoutLineCount = readInt();
+//		String[] stdoutLines = new String[stdoutLineCount];
+//		for (int i=0; i<stdoutLineCount ; i++) {
+//			stdoutLines[i] = readString();
+//			userLog.log(stdoutLines[i]);
+//		}
+//		return stdoutLines;
+		return null;
+	}
+	void launchCmd(String cmd) {
+		if (!on) return;
+		write(APP);
+		write(cmd, true);
+		readBoolean();
+	}
+	
+	String api(String url, String method, String headers, String body, String filePath) {
+		if (!on) return null;
+		write(API);
+		write(url);
+		write(method);
+		write(headers);
+		write(body);
+		write(filePath, true);
+		String ret = readString();
+		return ret;
+	}
+
+//	void browserUpdate(String browserName) {
+//		if (!on) return;
+//		write(BROWSER_UPDATE);
+//		write(browserName);
+//		readBoolean();
+//	}
+	
+	byte[] fileFromNode(String directory, String fileName, int timeout) {
+		if (!on) return null;
+		byte[] ret = null;
+		write(FILE_TO_BOT);
+		write(timeout);
+		write(directory);
+		write(fileName, true);
+		long fileSize = readLong();
+		boolean fileExists = fileSize > 0;
+		if (fileExists) {
+			fileName = readString();
+			write(true, true);// send to ask node to send file
+			try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+				byte[] bytes = new byte[8192];
+				long bytesRemaining = fileSize;
+				int bytesRead;
+				while ( 0 < bytesRemaining && 0 <= (bytesRead = response.read(bytes))) {
+					bytesRemaining -= bytesRead;
+					baos.write(bytes, 0, bytesRead);
+				}
+			    baos.flush();
+			    ret = baos.toByteArray();
+//Todo: uncomment this.
+//				userLog.file("Read file: ", baos, fileName);
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		} else {
+			write(false, true);// send to ask node NOT to send file
+		}
+		return ret;
+	}
+	
+	boolean jarFileToNode(String version) {
+		boolean isVersionOK = false;
+		String fName = "QsomeNodeExec-"+version+".jar";
+		File jarFile = new File(fName);
+		try (FileInputStream fis = new FileInputStream(jarFile)) {
+			write(true);
+			write(jarFile.getName());
+			write(jarFile.length(), true);
+			byte[] buffer = new byte[8192];
+			int bytesRead;
+			while (0 <= (bytesRead = fis.read(buffer))) {
+				request.write(buffer, 0, bytesRead);
+			}
+			request.flush();
+    		isVersionOK = readBoolean();
+    		if (! isVersionOK) {
+    			String except = response.readUTF();
+    			userLog.log(except);
+    		}
+    		userLog.log("Qsome upgraded on the node");
+		} catch (IOException e) {
+			e.printStackTrace();
+			write(false, true);
+    		userLog.log("Desired version of Qsome not found");
+		}
+		return isVersionOK;
+	}
+
+	String fileToNode(File file) {
+		if (!on) return null;
+		
+		String filePath = null;
+		try (FileInputStream fis = new FileInputStream(file)) {
+			write(FILE_FROM_BOT);
+			write(file.getName());
+			write(file.length(), true);
+			byte[] buffer = new byte[8192];
+			int bytesRead;
+			while (0 <= (bytesRead = fis.read(buffer))) {
+				request.write(buffer, 0, bytesRead);
+			}
+			request.flush();
+			filePath = readString();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		return filePath;
+	}
+//	String fileToNode(File file) {
+//		if (!on) return null;
+//		write(FILE_FROM_BOT);
+//		write(file.getName());
+//		write(file.length(), true);
+//		
+//		try (FileInputStream fis = new FileInputStream(file)) {
+//			byte[] buffer = new byte[8192];
+//			int bytesRead;
+//			while (0 <= (bytesRead = fis.read(buffer))) {
+//				request.write(buffer, 0, bytesRead);
+//			}
+//			request.flush();
+//		} catch (IOException e) {
+//			e.printStackTrace();
+//		}
+//		String filePath = readString();
+//		return filePath;
+//	}
+	public boolean exists(String fileName) {
+		return false;
+	}
+}
