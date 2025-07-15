@@ -124,17 +124,10 @@ OAUTH2_PROVIDER = {
 
 
 CHANNEL_LAYERS = {
-    "default": {
-        "BACKEND": "channels_redis.pubsub.RedisPubSubChannelLayer", 
-        "CONFIG": {
-            "hosts": ["redis://127.0.0.1:6379/"], 
-            # Or if you have a password: "hosts": ["redis://:yourpassword@127.0.0.1:6379/"],
-        },
-    },
     # For local development without Redis, you can uncomment this in-memory layer:
-    # "default": { 
-    #     # "BACKEND": "channels.layers.InMemoryChannelLayer",
-    # },
+    "default": { 
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+    },
 }
 
 # --- LOGGING CONFIGURATION (UPDATED for file logging with levels) ---
