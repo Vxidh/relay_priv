@@ -1,9 +1,0 @@
-venv
-staticfiles
-db.sqlite3
-target
-rpa_client_access_token.txt
-rpa_client_node_id.txt
-rpa_client_refresh_token.txt
-rpa_client_token_expiry.txt
-__pycache__

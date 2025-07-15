@@ -1,18 +1,17 @@
-# File: python-client/NodeClient.py (REFACTORED FOR WEBSOCKETS/ASYNCIO)
+# File: NodeClient.py
 
-import asyncio
-import websockets
+import websocket
 import json
+import threading
 import uuid
 import os
+import queue
 import logging
 import traceback
 import base64
 import time
-from datetime import datetime, timezone
-import threading # Import threading for managing the dedicated loop thread
 
-from commands import CommandDispatcher
+from commands import CommandDispatcher # Assuming commands.py is where CommandDispatcher is defined
 
 logger = logging.getLogger('NodeClient')
 
@@ -24,73 +23,51 @@ class NodeClient:
         self.download_dir = download_dir
         self.initial_metadata = initial_metadata if initial_metadata is not None else {}
 
-        self._ws = None # Will hold the active websockets connection instance
-        self._running = False # Controls the main connection loop (set by stop() from other thread)
-        
-        # These will be created in the dedicated thread's context
-        self._websocket_loop = None # The dedicated asyncio event loop for this client's thread
-        self._shutdown_event = None # Event to signal the asyncio loop to stop gracefully
-        self._connected_event = None # Asyncio Event for connection status signaling
+        self.ws = None
+        self.running = False
+        self.current_task_state = {}
 
-        self._websocket_thread = None # Reference to the thread running the WebSocket loop
-
-        # Use asyncio.Queue for inter-task communication within the asyncio loop
-        self.command_queue = asyncio.Queue() # Commands received from server for worker
-        self.outgoing_ws_queue = asyncio.Queue() # Messages to send to server
-
-        # CommandDispatcher is initialized with a reference to this async NodeClient
+        # Ensure CommandDispatcher is initialized with a reference to this NodeClient
         self.dispatcher = CommandDispatcher(node_client_ref=self)
 
+        self.command_queue = queue.Queue()
+        self.outgoing_ws_queue = queue.Queue()
+
+        self.worker_thread = threading.Thread(target=self._command_worker, daemon=True)
+        self._ws_sender_thread = threading.Thread(target=self._websocket_sender, daemon=True)
+
+        self._connected_event = threading.Event()
+
+        # Callback for handling invalid node ID (close code 4409)
         self.on_node_id_invalid = on_node_id_invalid
 
-        self._worker_task = None # To hold the asyncio task for command worker
-        self._sender_task = None # To hold the asyncio task for websocket sender
+    def is_connected(self):
+        # Check if the event is set AND if the websocket connection is active
+        return self._connected_event.is_set() and self.ws and self.ws.sock and self.ws.sock.connected
 
-        logger.info(f"NodeClient initialized for node {self.node_id}.")
-
-    async def is_connected(self):
-        """
-        Checks if the WebSocket connection to the Relay server is currently active.
-        This is an async method, as it relies on asyncio.Event.
-        """
-        # Ensure events are initialized before trying to wait on them
-        if self._connected_event is None:
-            return False
-
-        # Wait a very short moment for the event to be potentially set/cleared by the loop.
-        # This prevents blocking if the loop isn't running or the event isn't set immediately.
-        try:
-            await asyncio.wait_for(self._connected_event.wait(), timeout=0.1)
-        except asyncio.TimeoutError:
-            pass # Event not set within timeout, proceed to check status
-        
-        # Check if the event is set AND if the websocket instance is valid and not closed.
-        return self._connected_event.is_set() and self._ws is not None and not self._ws.closed
-
-    async def _on_message(self, message):
-        """
-        Internal handler for incoming WebSocket messages.
-        This replaces the old on_message callback.
-        """
+    def on_message(self, ws, message):
         try:
             data = json.loads(message)
             msg_type = data.get('type')
-            
-            request_id = data.get('command', {}).get('requestId') # For commands received from the server
-            
-            logger.info(f"NodeClient: Received message type '{msg_type}' (Req ID: {request_id or 'N/A'}).")
 
             if msg_type == 'command':
                 command_data = data.get('command')
+                # The requestId is now expected directly in the command_data payload
+                request_id = command_data.get('requestId')
                 if command_data:
-                    logger.info(f"NodeClient: Received command (Req ID: {command_data.get('requestId')}). Queuing for worker.")
-                    await self.command_queue.put(command_data) # Put command into asyncio queue
+                    logger.info(f"NodeClient: Received command (Req ID: {request_id}). Queuing for worker.")
+                    # Put the entire command_data dictionary into the queue
+                    self.command_queue.put(command_data)
                 else:
                     logger.warning(f"NodeClient: Received 'command' type message without 'command' data: {message}")
             elif msg_type == 'node_status_check':
                 logger.info("NodeClient: Received node_status_check from server. Sending pong.")
-                await self._send_command_response("N/A", "PONG", {"message": "Client is alive."})
+                # For status checks, we don't have an original requestId, so use a placeholder or generate new
+                # If the orchestrator doesn't poll for this, "N/A" is fine.
+                self._send_command_response("N/A", "PONG", {"message": "Client is alive."})
             elif msg_type == 'send_file_to_node':
+                # This block handles files sent *from* the Relay Server *to* the node.
+                # This is separate from the node *uploading* files to the server.
                 file_info = data.get('file', {})
                 request_id = file_info.get('requestId') or file_info.get('request_id')
                 filename = file_info.get('filename')
@@ -98,7 +75,8 @@ class NodeClient:
 
                 if not (request_id and filename and file_content_b64):
                     logger.error(f"NodeClient: Malformed 'send_file_to_node' message: {file_info}")
-                    await self._send_command_response(request_id, "error", error_message="Malformed file transfer message from server.")
+                    # Use _send_command_response to send error back to relay
+                    self._send_command_response(request_id, "error", error_message="Malformed file transfer message from server.")
                     return
 
                 try:
@@ -108,111 +86,159 @@ class NodeClient:
                     with open(save_path, "wb") as f:
                         f.write(decoded_content)
                     logger.info(f"NodeClient: Successfully received and saved file '{filename}' to '{save_path}'.")
-                    await self._send_command_response(request_id, "success", response_payload={
+                    # Send success response back to relay
+                    self._send_command_response(request_id, "success", response_payload={
                         "message": f"File '{filename}' received and saved.",
                         "local_path": save_path,
                         "file_size": len(decoded_content)
                     })
                 except Exception as e:
                     logger.exception(f"NodeClient: Error processing file transfer from server for requestId {request_id}: {e}")
-                    await self._send_command_response(request_id, "error", error_message=f"Error saving file from server: {str(e)}")
+                    self._send_command_response(request_id, "error", error_message=f"Error saving file from server: {str(e)}")
+
             else:
                 logger.warning(f"NodeClient: Received unknown message type: {msg_type}")
         except json.JSONDecodeError:
-            logger.error(f"NodeClient: Failed to decode JSON from WS message: {message[:100]}...")
+            logger.error(f"NodeClient: Failed to decode JSON from WS message: {message}")
         except Exception as e:
-            logger.exception(f"NodeClient: Error in _on_message handler: {e}")
+            logger.exception(f"NodeClient: Error in on_message handler: {e}")
 
-    async def _command_worker(self):
-        """Asynchronous worker to process commands from the queue."""
-        logger.info("NodeClient: Command worker task started.")
-        while self._running and not (self._shutdown_event and self._shutdown_event.is_set()): # Check if _shutdown_event is not None
-            command_data = None
+    def on_error(self, ws, error):
+        logger.error(f"NodeClient: WebSocket Error: {error}")
+        self._connected_event.clear()
+        self.running = False # Set running to False on error to stop threads
+
+    def on_close(self, ws, close_status_code, close_msg):
+        logger.warning(f"NodeClient: WebSocket Closed. Status Code: {close_status_code}, Message: {close_msg}")
+        self._connected_event.clear()
+        self.running = False # Set running to False on close to stop threads
+
+        if close_status_code == 4409:
+            logger.error("NodeClient: Node ID invalid or already active (4409). Triggering node ID invalid callback.")
+            if self.on_node_id_invalid:
+                self.on_node_id_invalid()
+
+    def on_open(self, ws):
+        logger.info("NodeClient: WebSocket connection opened successfully.")
+        self._connected_event.set()
+        self.running = True # Ensure running is True when connection opens
+        self._start_threads() # Start worker threads after connection is open
+        initial_request_id = str(uuid.uuid4())
+        # Send initial node metadata message
+        # The 'type' is now 'node_metadata' and node_id is at the top level
+        self.send_outgoing_ws_message({
+            "type": "node_response",
+            "response": {
+                "requestId": initial_request_id, # Use the generated request ID
+                "status": "node_connected", # A status indicating initial connection
+                "message": "Node client connected and sent initial metadata.",
+                "responsePayload": { # Nest node_id and metadata here
+                    "node_id": self.node_id,
+                    "metadata": self.initial_metadata
+                },
+                "timestamp": time.time(),
+                "node_id": self.node_id # Redundant but harmless, for clarity on server side
+            }
+        })
+        logger.info(f"NodeClient: Sent initial node metadata (Req ID: {initial_request_id}): {self.initial_metadata}")
+
+    # --- MODIFIED: _command_worker to correctly extract and pass requestId and send response ---
+    def _command_worker(self):
+        logger.info("NodeClient: Command worker thread started.")
+        while self.running:
+            command_data = None  # Initialize to None for the scope of the loop
             try:
-                command_data = await self.command_queue.get()
+                # Get the full command dictionary, which includes 'requestId' from the Orchestrator
+                command_data = self.command_queue.get(timeout=1)
 
                 command_type = command_data.get('commandType', 'N/A')
+                # Extract the Orchestrator-generated requestId
                 request_id = command_data.get('requestId')
 
                 logger.info(f"NodeClient: Worker processing command: {command_type} (Req ID: {request_id})")
 
-                result_from_dispatcher = await asyncio.to_thread(self.dispatcher.execute_command, command_data)
+                # Execute the command via the dispatcher and capture its result
+                # The dispatcher's execute_command method now returns a dictionary
+                result_from_dispatcher = self.dispatcher.execute_command(command_data)
 
-                await self._send_command_response(
-                    request_id=result_from_dispatcher.get('requestId', request_id),
+                # Send this result back to the Relay Server via _send_command_response
+                # The result_from_dispatcher should already contain 'status', 'message', 'response', 'requestId'
+                # We need to map these to the parameters of _send_command_response
+                self._send_command_response(
+                    request_id=result_from_dispatcher.get('requestId', request_id), # Use requestId from result or original
                     status=result_from_dispatcher.get('status', 'ERROR'),
-                    response_payload=result_from_dispatcher.get('response', {}),
+                    response_payload=result_from_dispatcher.get('response', {}), # Pass the inner 'response' as payload
                     error_message=result_from_dispatcher.get('message') if result_from_dispatcher.get('status') == 'error' else None,
                     traceback=result_from_dispatcher.get('traceback')
                 )
 
-            except asyncio.CancelledError:
-                logger.info("NodeClient: Command worker task cancelled.")
-                break
+            except queue.Empty:
+                # No command in queue, just continue loop. Do NOT call task_done() here.
+                continue
             except Exception as e:
-                logger.exception(f"NodeClient: Critical error in command worker task for Req ID {request_id if 'request_id' in locals() else 'UNKNOWN'}: {e}")
+                # This block handles errors *during the processing* of command_data
+                logger.exception(f"NodeClient: Critical error in command worker loop for Req ID {request_id if 'request_id' in locals() else 'UNKNOWN'}: {e}")
+                # Attempt to send an error response if a requestId is available
                 current_request_id = command_data.get('requestId') if command_data is not None else 'UNKNOWN'
-                await self._send_command_response(
+                self._send_command_response(
                     current_request_id,
-                    "ERROR",
+                    "ERROR", # Changed to ERROR for critical worker errors
                     error_message=f"Internal client processing error: {str(e)}",
                     traceback=traceback.format_exc()
                 )
             finally:
+                # Ensure task_done is called ONLY if an item was successfully retrieved from the queue
                 if command_data is not None:
                     self.command_queue.task_done()
+        logger.info("NodeClient: Command worker thread stopped.")
 
-        logger.info("NodeClient: Command worker task stopped.")
-
-    async def _websocket_sender(self):
-        """Asynchronous worker to send messages from the outgoing queue."""
-        logger.info("NodeClient: WebSocket sender task started.")
-        while self._running and not (self._shutdown_event and self._shutdown_event.is_set()): # Check if _shutdown_event is not None
-            message_to_send = None
+    def _websocket_sender(self):
+        logger.info("NodeClient: WebSocket sender thread started.")
+        while self.running:
             try:
-                message_to_send = await self.outgoing_ws_queue.get()
-                if self._ws and not self._ws.closed:
-                    await self._ws.send(json.dumps(message_to_send))
+                message_to_send = self.outgoing_ws_queue.get(timeout=1)
+                if self.ws and self.ws.sock and self.ws.sock.connected:
+                    self.ws.send(json.dumps(message_to_send)) # Ensure message is dumped to JSON string
                     logger.debug(f"NodeClient: Sent WS message type: {message_to_send.get('type')}, Req ID: {message_to_send.get('response', {}).get('requestId')}")
                 else:
                     logger.warning("NodeClient: WebSocket not connected, re-queuing message for later.")
-                    await self.outgoing_ws_queue.put(message_to_send)
-                    await asyncio.sleep(1)
+                    self.outgoing_ws_queue.put(message_to_send)
+                    time.sleep(1) # Wait before retrying
                 self.outgoing_ws_queue.task_done()
-            except asyncio.CancelledError:
-                logger.info("NodeClient: WebSocket sender task cancelled.")
-                break
-            except asyncio.QueueEmpty:
-                await asyncio.sleep(0.1)
+            except queue.Empty:
+                time.sleep(0.1) # Small sleep to prevent busy-waiting
                 continue
             except Exception as e:
-                logger.exception(f"NodeClient: Error in WebSocket sender task: {e}")
-        logger.info("NodeClient: WebSocket sender task stopped.")
+                logger.exception(f"NodeClient: Error in WebSocket sender: {e}")
+                self.running = False # Stop sender thread on critical error
+        logger.info("NodeClient: WebSocket sender thread stopped.")
 
-    async def send_outgoing_ws_message(self, message):
-        """Puts a message onto the outgoing WebSocket queue."""
-        await self.outgoing_ws_queue.put(message)
+    def send_outgoing_ws_message(self, message):
+        self.outgoing_ws_queue.put(message)
 
-    async def _send_command_response(self, request_id, status, response_payload=None, error_message=None, traceback=None):
+    # --- MODIFIED: _send_command_response to accept and use request_id ---
+    def _send_command_response(self, request_id, status, response_payload=None, error_message=None, traceback=None):
         """
         Sends a standard command response to the Relay Server via WebSocket.
+        Uses the request_id provided by the Orchestrator.
         """
         response_message = {
             "type": "node_response",
             "response": {
-                "requestId": request_id,
+                "requestId": request_id, # Use the received request_id here
                 "status": status,
                 "responsePayload": response_payload if response_payload is not None else {},
                 "error": error_message,
                 "traceback": traceback,
-                "node_id": self.node_id,
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "node_id": self.node_id, # Include node_id in response for clarity
+                "timestamp": time.time()
             }
         }
-        await self.send_outgoing_ws_message(response_message)
+        self.send_outgoing_ws_message(response_message)
         logger.info(f"NodeClient: Queued response for requestId '{request_id}' with status '{status}'.")
 
-    async def send_file_to_relay(self, file_path, request_id, metadata=None):
+    # --- MODIFIED: send_file_to_relay to accept and use request_id from Orchestrator ---
+    def send_file_to_relay(self, file_path, request_id, metadata=None): # Renamed original_request_id to request_id for consistency
         """
         Sends a file from the RPA client to the Django Relay Server via WebSocket.
         This method is called by the CommandDispatcher when a command instructs
@@ -220,12 +246,13 @@ class NodeClient:
         """
         if not os.path.exists(file_path):
             logger.error(f"NodeClient: File not found for upload: {file_path}")
-            await self._send_command_response(request_id, "error", error_message=f"File not found: {file_path}")
+            # Use _send_command_response for error reporting
+            self._send_command_response(request_id, "error", error_message=f"File not found: {file_path}")
             return False
         
         if not os.path.isfile(file_path):
             logger.error(f"NodeClient: Path is not a file: {file_path}")
-            await self._send_command_response(request_id, "error", error_message=f"Path is not a file: {file_path}")
+            self._send_command_response(request_id, "error", error_message=f"Path is not a file: {file_path}")
             return False
 
         try:
@@ -235,246 +262,74 @@ class NodeClient:
             file_name = os.path.basename(file_path)
             file_size = os.path.getsize(file_path)
 
+            # Construct the file_details payload
             file_details_payload = {
-                "request_id": request_id,
+                "request_id": request_id, # Use the received request_id here
                 "node_id": self.node_id,
                 "filename": file_name,
                 "file_size": file_size,
                 "file_content_base64": encoded_content,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": time.time(),
                 "metadata": metadata if metadata is not None else {"description": f"File uploaded from RPA node {self.node_id}"}
             }
 
+            # Wrap it in the 'response' structure as expected by consumers.py
             response_message = {
-                "type": "node_response",
+                "type": "node_response", # Type must be 'node_response' for consumers.py
                 "response": {
-                    "requestId": request_id,
-                    "status": "file_upload_complete",
+                    "requestId": request_id, # This is the requestId at the response level
+                    "status": "file_upload_complete", # Indicate file upload success
                     "message": f"File '{file_name}' uploaded.",
-                    "node_id": self.node_id,
-                    "file_details": file_details_payload
+                    "node_id": self.node_id, # Redundant but harmless, for clarity
+                    "file_details": file_details_payload # Nested file details
                 }
             }
             
-            await self.send_outgoing_ws_message(response_message)
+            self.send_outgoing_ws_message(response_message)
             logger.info(f"NodeClient: Queued file '{file_name}' for upload to Relay Server via WebSocket for Req ID: {request_id}.")
             return True
         except Exception as e:
             logger.exception(f"NodeClient: An unexpected error occurred during file upload preparation: {e}")
-            await self._send_command_response(request_id, "error", error_message=f"Error preparing file for upload: {str(e)}")
+            self._send_command_response(request_id, "error", error_message=f"Error preparing file for upload: {str(e)}")
             return False
 
-    async def _actual_connect_loop(self):
-        """
-        Establishes and manages the WebSocket connection to the Relay server.
-        This is the main asynchronous loop for the NodeClient's connection.
-        """
-        logger.info(f"NodeClient: Starting actual connection loop to: {self.server_url}")
+    def _start_threads(self):
+        # Ensure threads are only started if not already running
+        if self.worker_thread is None or not self.worker_thread.is_alive():
+            self.worker_thread = threading.Thread(target=self._command_worker, daemon=True)
+            self.worker_thread.start()
+            logger.debug("NodeClient: Command worker thread started.")
+        else:
+            logger.debug("NodeClient: Command worker thread is already running.")
 
-        # Construct the URL with the token as a query parameter
-        # This is the workaround for the 'extra_headers' TypeError
-        token_url = f"{self.server_url}?token={self.access_token}"
-
-        while self._running and not (self._shutdown_event and self._shutdown_event.is_set()): # Check if _shutdown_event is not None
-            try:
-                logger.info(f"NodeClient: Connecting to {token_url}...")
-                async with websockets.connect(
-                    token_url, # Use the URL with the token
-                    # extra_headers={'Authorization': f'Bearer {self.access_token}'}, # REMOVED: Causes TypeError
-                    open_timeout=10, # Timeout for connection establishment
-                    close_timeout=5,  # Timeout for graceful close
-                    ping_interval=20, # Send ping every 20 seconds
-                    ping_timeout=10   # Close connection if pong not received within 10 seconds
-                ) as websocket:
-                    self._ws = websocket
-                    logger.info(f"NodeClient: WebSocket connected to {self.server_url}.")
-                    self._connected_event.set() # Signal that connection is established
-
-                    self._worker_task = asyncio.create_task(self._command_worker())
-                    self._sender_task = asyncio.create_task(self._websocket_sender())
-
-                    initial_request_id = str(uuid.uuid4())
-                    initial_metadata_payload = {
-                        "type": "node_response",
-                        "response": {
-                            "requestId": initial_request_id,
-                            "status": "node_connected",
-                            "message": "Node client connected and sent initial metadata.",
-                            "responsePayload": {
-                                "node_id": self.node_id,
-                                "metadata": self.initial_metadata
-                            },
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "node_id": self.node_id
-                        }
-                    }
-                    await self._ws.send(json.dumps(initial_metadata_payload))
-                    logger.info(f"NodeClient: Sent initial node metadata (Req ID: {initial_request_id}).")
-
-                    while not self._ws.closed and self._running and not (self._shutdown_event and self._shutdown_event.is_set()): # Check if _shutdown_event is not None
-                        try:
-                            message = await asyncio.wait_for(self._ws.recv(), timeout=60)
-                            await self._on_message(message)
-                        except asyncio.TimeoutError:
-                            logger.debug("NodeClient: No message received for 60 seconds. (Ping/pong handled by websockets library).")
-                            continue
-                        except websockets.exceptions.ConnectionClosed:
-                            logger.info("NodeClient: Connection closed by peer during recv().")
-                            break
-                        except Exception as e:
-                            logger.exception(f"NodeClient: Error during message receive/process: {e}. Breaking inner loop.")
-                            break
-
-            except websockets.exceptions.ConnectionClosedOK:
-                logger.info("NodeClient: WebSocket connection closed gracefully.")
-            except websockets.exceptions.ConnectionClosedError as e:
-                logger.warning(f"NodeClient: WebSocket connection closed with error: {e}. Retrying...")
-            except asyncio.TimeoutError:
-                logger.warning("NodeClient: Connection attempt timed out. Retrying...")
-            except OSError as e:
-                logger.error(f"NodeClient: Network/OS error during connection: {e}. Retrying...")
-            except Exception as e:
-                logger.exception(f"NodeClient: Unexpected error during WebSocket connection: {e}. Retrying...")
-            finally:
-                self._ws = None
-                if self._connected_event: # Only clear if initialized
-                    self._connected_event.clear()
-
-                if self._worker_task and not self._worker_task.done():
-                    self._worker_task.cancel()
-                    try: await self._worker_task
-                    except asyncio.CancelledError: pass
-                
-                if self._sender_task and not self._sender_task.done():
-                    self._sender_task.cancel()
-                    try: await self._sender_task
-                    except asyncio.CancelledError: pass
-
-                while not self.command_queue.empty():
-                    try: await self.command_queue.get()
-                    except Exception: pass # Handle potential error if queue item is not awaitable after loop close
-                while not self.outgoing_ws_queue.empty():
-                    try: await self.outgoing_ws_queue.get()
-                    except Exception: pass # Handle potential error if queue item is not awaitable after loop close
-
-                if self._running and self._shutdown_event and not self._shutdown_event.is_set(): # Check if _shutdown_event is not None
-                    logger.info("NodeClient: Waiting 5 seconds before attempting to reconnect...")
-                    try:
-                        await asyncio.wait_for(self._shutdown_event.wait(), timeout=5)
-                        break
-                    except asyncio.TimeoutError:
-                        pass
-
-        logger.info("NodeClient: Main connection loop terminated.")
-
-
-    def _run_websocket_loop(self):
-        """
-        Target function for the NodeClient's dedicated thread.
-        Initializes and runs its own asyncio event loop.
-        """
-        logger.info("NodeClient: Starting new WebSocket event loop in separate thread.")
-        self._websocket_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._websocket_loop)
-
-        self._shutdown_event = asyncio.Event()
-        self._connected_event = asyncio.Event() # Create asyncio.Event objects within THIS loop's context
-
-        try:
-            self._websocket_loop.run_until_complete(self._actual_connect_loop())
-        except Exception as e:
-            logger.critical(f"NodeClient: Unhandled exception in main WebSocket connection loop: {e}", exc_info=True)
-        finally:
-            if self._websocket_loop and not self._websocket_loop.is_closed():
-                pending_tasks = asyncio.all_tasks(self._websocket_loop)
-                for task in pending_tasks:
-                    task.cancel()
-                    try:
-                        self._websocket_loop.run_until_complete(asyncio.wait_for(task, timeout=1.0))
-                    except (asyncio.CancelledError, asyncio.TimeoutError):
-                        pass
-                    except Exception as e:
-                        logger.error(f"NodeClient: Error cancelling task during loop shutdown: {e}")
-
-                self._websocket_loop.run_until_complete(self._websocket_loop.shutdown_asyncgens())
-                self._websocket_loop.close()
-                logger.info("NodeClient: WebSocket event loop closed.")
-            else:
-                logger.info("NodeClient: WebSocket event loop was already closed or not initialized.")
-            
-            self._websocket_loop = None
-            self._shutdown_event = None
-            self._connected_event = None
-            logger.info("NodeClient: _run_websocket_loop method finished.")
+        if self._ws_sender_thread is None or not self._ws_sender_thread.is_alive():
+            self._ws_sender_thread = threading.Thread(target=self._websocket_sender, daemon=True)
+            self._ws_sender_thread.start()
+            logger.debug("NodeClient: WebSocket sender thread started.")
+        else:
+            logger.debug("NodeClient: WebSocket sender thread is already running.")
 
     def connect(self):
-        """
-        Synchronous entry point to start the NodeClient's WebSocket connection
-        and message handling loop in a new, dedicated thread.
-        """
-        if self._running and self._websocket_thread and self._websocket_thread.is_alive():
-            logger.warning("NodeClient is already running.")
-            return
+        logger.info(f"NodeClient: Attempting to connect to: {self.server_url}")
 
-        self._running = True
-        self._websocket_thread = threading.Thread(target=self._run_websocket_loop, daemon=True)
-        self._websocket_thread.start()
-        logger.info("NodeClient: Started connection thread.")
-
-    def stop(self):
-        """
-        Gracefully stops the NodeClient, signaling its dedicated thread to shut down.
-        This method is called from a different thread (main.py's thread).
-        """
-        logger.info("NodeClient: Stopping NodeClient.")
-        
-        if not self._running and (self._websocket_thread is None or not self._websocket_thread.is_alive()):
-            logger.info("NodeClient: Agent is not running or not initialized, no need to stop.")
-            return
-
-        self._running = False
-
-        if self._websocket_loop and not self._websocket_loop.is_closed():
-            if self._shutdown_event:
-                try:
-                    asyncio.run_coroutine_threadsafe(self._shutdown_event.set(), self._websocket_loop).result(timeout=1)
-                    logger.debug("NodeClient: Signaled shutdown event to its loop.")
-                except asyncio.TimeoutError:
-                    logger.warning("NodeClient: Timeout waiting for shutdown event to set on its loop.")
-                except Exception as e:
-                    logger.error(f"NodeClient: Error scheduling shutdown event set: {e}")
-            else:
-                logger.warning("NodeClient: _shutdown_event is None, cannot signal graceful shutdown to loop.")
-
-            if self._ws and not self._ws.closed:
-                logger.debug("NodeClient: Attempting to schedule WebSocket close from stop().")
-                try:
-                    async def _close_ws_coroutine():
-                        if self._ws and not self._ws.closed:
-                            await self._ws.close()
-                    asyncio.run_coroutine_threadsafe(_close_ws_coroutine(), self._websocket_loop).result(timeout=5)
-                    logger.info("NodeClient: WebSocket graceful close scheduled and completed from stop().")
-                except asyncio.TimeoutError:
-                    logger.warning("NodeClient: Timeout waiting for WebSocket to close from stop().")
-                except Exception as e:
-                    logger.error(f"NodeClient: Error during WebSocket close scheduling from stop(): {e}")
-                finally:
-                    self._ws = None
-
-            if self._connected_event: # Only clear if initialized
-                self._connected_event.clear()
-
-            if self._websocket_thread and self._websocket_thread.is_alive():
-                logger.info("NodeClient: Waiting for NodeClient thread to finish...")
-                self._websocket_thread.join(timeout=10)
-                if self._websocket_thread.is_alive():
-                    logger.warning("NodeClient: NodeClient thread did not stop gracefully within timeout.")
-                else:
-                    logger.info("NodeClient: NodeClient thread finished.")
-            self._websocket_thread = None
+        headers = [f"Authorization: Bearer {self.access_token}"] if self.access_token else []
+        if headers:
+            logger.info("NodeClient: Including Authorization header for WebSocket connection.")
         else:
-            logger.warning("NodeClient: WebSocket loop not running or already closed when stop() called.")
-            if self._connected_event: # Only clear if initialized
-                self._connected_event.clear()
+            logger.warning("NodeClient: No access token provided for WebSocket connection. Connection might fail due to lack of authentication.")
 
-        logger.info("NodeClient: NodeClient stopped.")
+        websocket.enableTrace(False)
+        self.ws = websocket.WebSocketApp(
+            self.server_url,
+            header=headers,
+            on_open=self.on_open,
+            on_message=self.on_message,
+            on_error=self.on_error,
+            on_close=self.on_close
+        )
+
+        logger.info("NodeClient: WebSocketApp created. Calling run_forever...")
+        # run_forever will block, so it needs to be in a separate thread if main thread needs to do other things
+        # However, NodeClient.connect is typically called in a separate thread from main.py
+        self.ws.run_forever(ping_interval=10, ping_timeout=5, reconnect=5)
+        logger.info("NodeClient: WebSocket run_forever stopped.")

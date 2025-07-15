@@ -10,7 +10,6 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('relay_server.urls')),
     path('o/', include('oauth2_provider.urls', namespace='oauth2_provider')), 
-    path('remote-control/', include('remote_control_app.urls')),
 ]
 if settings.DEBUG:
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
