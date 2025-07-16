@@ -23,8 +23,8 @@ from NodeClient import NodeClient # Assuming NodeClient.py is in the same direct
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger('RPAClient')
-DJANGO_RELAY_SERVER_BASE_URL = "http://localhost:8000/api/" # Base for HTTP APIs (Note: This is still here for OAuth, but not for node verification)
-DJANGO_RELAY_SERVER_WS_URL = "ws://localhost:8000/ws/rpa-node/"
+DJANGO_RELAY_SERVER_BASE_URL = "http://192.168.86.54:8000/api/" # Base for HTTP APIs (Note: This is still here for OAuth, but not for node verification)
+DJANGO_RELAY_SERVER_WS_URL = "ws://192.168.86.54:8000/ws/rpa-node/"
 NODE_ID_FILE = "rpa_client_node_id.txt"
 ACCESS_TOKEN_FILE = "rpa_client_access_token.txt"
 REFRESH_TOKEN_FILE = "rpa_client_refresh_token.txt"
@@ -165,9 +165,9 @@ def generate_code_challenge(verifier):
 
 # --- PKCE OAuth2 Flow ---
 OAUTH2_CLIENT_ID = "bc0xM6l96NYdvXghcapdtkP7hiSKHSeCFAH5E9T3"  # Set this to your DOT Application's client_id
-OAUTH2_AUTH_URL = "http://localhost:8000/o/authorize/"
-OAUTH2_TOKEN_URL = "http://localhost:8000/o/token/"
-OAUTH2_REDIRECT_URI = "http://localhost:8080/callback"
+OAUTH2_AUTH_URL = "http://192.168.86.54:8000/o/authorize/"
+OAUTH2_TOKEN_URL = "http://192.168.86.54:8000/o/token/"
+OAUTH2_REDIRECT_URI = "http://localhost:5005/callback"
 OAUTH2_SCOPES = "rpa:connect rpa:commands" # Ensure these scopes match your Django OAuth2 Provider setup
 
 class OAuth2CallbackHandler(BaseHTTPRequestHandler):
@@ -255,7 +255,7 @@ def pkce_authorization_flow():
     webbrowser.open(auth_url)
 
     # Start a local HTTP server in a separate thread to listen for the redirect
-    server = HTTPServer(('localhost', 8080), OAuth2CallbackHandler)
+    server = HTTPServer(('localhost', 5005), OAuth2CallbackHandler)
     server.auth_code = None
     server_thread = threading.Thread(target=server.serve_forever)
     server_thread.daemon = True # Allow the main program to exit even if this thread is running
