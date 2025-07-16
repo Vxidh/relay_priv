@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>Remote Control</title>
+    <style>
+        body {
+            background: #181818;
+            color: #f0f0f0;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        h2 {
+            margin-top: 20px;
+            font-size: 2rem;
+            letter-spacing: 1px;
+        }
+        #node-form {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #222;
+            padding: 24px 32px;
+            border-radius: 12px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.2);
+            margin-bottom: 24px;
+        }
+        #node-form label {
+            margin: 8px 0 4px 0;
+            font-size: 1rem;
+        }
+        #node-form input {
+            margin-bottom: 12px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: none;
+            font-size: 1rem;
+            background: #333;
+            color: #f0f0f0;
+        }
+        #node-form button {
+            padding: 10px 24px;
+            border-radius: 6px;
+            border: none;
+            background: #4e8cff;
+            color: #fff;
+            font-size: 1rem;
+            cursor: pointer;
+            margin-top: 8px;
+            transition: background 0.2s;
+        }
+        #node-form button:hover {
+            background: #357ae8;
+        }
+        #status {
+            margin-bottom: 16px;
+            font-size: 1.1rem;
+            color: #ffb74d;
+            min-height: 24px;
+            text-align: center;
+        }
+        #canvas-container {
+            position: relative;
+            margin-bottom: 20px;
+        }
+        #image-stream {
+            width: 1200px;
+            height: 800px;
+            border: 2px solid #4e8cff;
+            background: #222;
+            border-radius: 12px;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.15);
+            cursor: crosshair;
+            image-rendering: -webkit-optimize-contrast;
+            image-rendering: crisp-edges;
+            image-rendering: pixelated;
+        }
+        #quality-controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(34, 34, 34, 0.9);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        #quality-controls label {
+            margin-right: 8px;
+        }
+        #quality-controls select {
+            background: #333;
+            color: #f0f0f0;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 4px;
+        }
+        #controls {
+            margin-top: 16px;
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .control-group {
+            background: #222;
+            padding: 16px;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+        }
+        .control-group label {
+            font-size: 0.9rem;
+            color: #ccc;
+        }
+        #keyboard-input {
+            width: 200px;
+            padding: 8px;
+            background: #333;
+            color: #f0f0f0;
+            border: 1px solid #555;
+            border-radius: 4px;
+        }
+        .key-button {
+            padding: 6px 12px;
+            background: #444;
+            color: #f0f0f0;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: background 0.2s;
+        }
+        .key-button:hover {
+            background: #555;
+        }
+        #connection-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            z-index: 1000;
+        }
+        .status-connected {
+            background: #4caf50;
+            color: white;
+        }
+        .status-disconnected {
+            background: #f44336;
+            color: white;
+        }
+        .status-connecting {
+            background: #ff9800;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <h2>Remote Control</h2>
+    <form id="node-form">
+        <label for="node-id">Node ID:</label>
+        <input type="text" id="node-id" required placeholder="Enter Node ID" />
+        <label for="token">Token:</label>
+        <input type="text" id="token" required placeholder="Enter Auth Token" />
+        <button type="submit">Connect</button>
+    </form>
+    <div id="status"></div>
+    <div id="connection-status" class="status-disconnected">Disconnected</div>
+    
+    <div id="canvas-container">
+        <canvas id="image-stream" width="1200" height="800"></canvas>
+        <div id="quality-controls">
+            <label for="quality-select">Quality:</label>
+            <select id="quality-select">
+                <option value="high">High</option>
+                <option value="medium" selected>Medium</option>
+                <option value="low">Low</option>
+            </select>
+        </div>
+    </div>
+
+    <div id="controls">
+        <div class="control-group">
+            <label>Keyboard Input</label>
+            <input type="text" id="keyboard-input" placeholder="Type text here..." />
+            <button class="key-button" onclick="sendSpecialKey('Return')">Enter</button>
+            <button class="key-button" onclick="sendSpecialKey('Tab')">Tab</button>
+            <button class="key-button" onclick="sendSpecialKey('Escape')">Esc</button>
+            <button class="key-button" onclick="sendSpecialKey('Backspace')">Backspace</button>
+            <button class="key-button" onclick="sendSpecialKey('Delete')">Delete</button>
+        </div>
+        <div class="control-group">
+            <label>Special Keys</label>
+            <button class="key-button" onclick="sendKeyCombo(['ctrl', 'c'])">Ctrl+C</button>
+            <button class="key-button" onclick="sendKeyCombo(['ctrl', 'v'])">Ctrl+V</button>
+            <button class="key-button" onclick="sendKeyCombo(['ctrl', 'z'])">Ctrl+Z</button>
+            <button class="key-button" onclick="sendKeyCombo(['ctrl', 'y'])">Ctrl+Y</button>
+            <button class="key-button" onclick="sendKeyCombo(['alt', 'F4'])">Alt+F4</button>
+            <button class="key-button" onclick="sendKeyCombo(['ctrl', 'alt', 'Delete'])">Ctrl+Alt+Del</button>
+        </div>
+        <div class="control-group">
+            <label>Function Keys</label>
+            <button class="key-button" onclick="sendSpecialKey('F1')">F1</button>
+            <button class="key-button" onclick="sendSpecialKey('F2')">F2</button>
+            <button class="key-button" onclick="sendSpecialKey('F5')">F5</button>
+            <button class="key-button" onclick="sendSpecialKey('F11')">F11</button>
+            <button class="key-button" onclick="sendSpecialKey('F12')">F12</button>
+        </div>
+    </div>
+
+    <script>
+        let imageSocket, commandSocket;
+        let canvas = document.getElementById('image-stream');
+        let ctx = canvas.getContext('2d');
+        let nodeId = '';
+        let token = '';
+        let isMouseDown = false;
+        let lastMousePos = { x: 0, y: 0 };
+        let connectionStatus = document.getElementById('connection-status');
+        let qualitySelect = document.getElementById('quality-select');
+        let currentQuality = 'medium';
+
+        // Enhanced image rendering settings
+        ctx.imageSmoothingEnabled = false;
+        ctx.webkitImageSmoothingEnabled = false;
+        ctx.mozImageSmoothingEnabled = false;
+        ctx.msImageSmoothingEnabled = false;
+
+        document.getElementById('node-form').onsubmit = function(e) {
+            e.preventDefault();
+            nodeId = document.getElementById('node-id').value;
+            token = document.getElementById('token').value;
+            connectSockets(nodeId, token);
+        };
+
+        qualitySelect.addEventListener('change', function(e) {
+            currentQuality = e.target.value;
+            // Send screenshot command to get updated image quality
+            sendCommand('screenshot', {
+                quality: currentQuality
+            });
+        });
+
+        function updateConnectionStatus(status) {
+            connectionStatus.className = `status-${status}`;
+            connectionStatus.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+        }
+
+        function connectSockets(nodeId, token) {
+            updateConnectionStatus('connecting');
+            
+            // Image WebSocket
+            imageSocket = new WebSocket(`ws://${window.location.host}/ws/remote-control/image/${nodeId}/?token=${encodeURIComponent(token)}`);
+            imageSocket.binaryType = 'arraybuffer';
+
+            imageSocket.onopen = function() {
+                console.log("[Image WS] Connected");
+                // Request initial screenshot
+                sendCommand('screenshot', {
+                    quality: currentQuality
+                });
+            };
+
+            imageSocket.onmessage = function(event) {
+                if (event.data instanceof ArrayBuffer) {
+                    console.log(`[Image WS] Received ${event.data.byteLength} bytes`);
+
+                    const blob = new Blob([event.data], { type: 'image/jpeg' });
+                    console.log(`[Image WS] Blob size: ${blob.size}`);
+
+                    const img = new Image();
+
+                    img.onload = function () {
+                        console.log(`[Image] Loaded image of size ${img.width}x${img.height}`);
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        
+                        // Enhanced image drawing with better quality
+                        ctx.save();
+                        ctx.imageSmoothingEnabled = false;
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        ctx.restore();
+                        
+                        // Clean up the blob URL
+                        setTimeout(() => URL.revokeObjectURL(img.src), 1000);
+                    };
+
+                    img.onerror = function (e) {
+                        console.error(`[Image] Failed to load image`, e);
+                        document.getElementById('status').innerText = 'Failed to render image frame.';
+                    };
+
+                    img.src = URL.createObjectURL(blob);
+                } else {
+                    try {
+                        let msg = JSON.parse(event.data);
+                        document.getElementById('status').innerText = msg.message || '';
+                    } catch (err) {
+                        console.warn("[Image WS] Non-JSON text message:", event.data);
+                    }
+                }
+            };
+
+            imageSocket.onclose = function() {
+                document.getElementById('status').innerText = 'Image stream disconnected.';
+                updateConnectionStatus('disconnected');
+            };
+
+            imageSocket.onerror = function(error) {
+                console.error("[Image WS] Error:", error);
+                updateConnectionStatus('disconnected');
+            };
+
+            // Command WebSocket
+            commandSocket = new WebSocket(`ws://${window.location.host}/ws/remote-control/command/${nodeId}/?token=${encodeURIComponent(token)}`);
+
+            commandSocket.onopen = function() {
+                console.log("[Command WS] Connected. Waiting for node readiness...");
+            };
+
+            commandSocket.onmessage = function(event) {
+                try {
+                    let msg = JSON.parse(event.data);
+                    if (msg.type === "ready") {
+                        sendStartRemoteControl();
+                        updateConnectionStatus('connected');
+                    }
+                    document.getElementById('status').innerText = msg.message || '';
+                } catch (err) {
+                    console.error("[Command WS] Failed to parse message:", err);
+                }
+            };
+
+            commandSocket.onclose = function() {
+                document.getElementById('status').innerText = 'Command channel disconnected.';
+                updateConnectionStatus('disconnected');
+            };
+
+            commandSocket.onerror = function(error) {
+                console.error("[Command WS] Error:", error);
+                updateConnectionStatus('disconnected');
+            };
+        }
+
+        function sendStartRemoteControl() {
+            if (commandSocket && commandSocket.readyState === WebSocket.OPEN) {
+                let controllerId = 'frontend_' + Date.now();
+                let requestId = 'req_' + Date.now();
+                let cmd = {
+                    commandType: 'start_remote_control',
+                    requestId: requestId,
+                    params: {
+                        controllerId: controllerId,
+                        nodeId: nodeId
+                    }
+                };
+                commandSocket.send(JSON.stringify(cmd));
+                console.log("[Sent] start_remote_control", cmd);
+            }
+        }
+
+        function sendCommand(commandType, params) {
+            if (commandSocket && commandSocket.readyState === WebSocket.OPEN) {
+                let requestId = 'req_' + Date.now();
+                let cmd = {
+                    commandType: commandType,
+                    requestId: requestId,
+                    params: params || {}
+                };
+                commandSocket.send(JSON.stringify(cmd));
+                console.log(`[Sent] ${commandType}`, params);
+            } else {
+                console.warn(`[Command] Cannot send ${commandType} - socket not ready`);
+            }
+        }
+
+        function getCanvasCoordinates(e) {
+            let rect = canvas.getBoundingClientRect();
+            return {
+                x: Math.round((e.clientX - rect.left) * (canvas.width / rect.width)),
+                y: Math.round((e.clientY - rect.top) * (canvas.height / rect.height))
+            };
+        }
+
+        // Enhanced Mouse Events matching InputCommands structure
+        canvas.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            isMouseDown = true;
+            let coords = getCanvasCoordinates(e);
+            lastMousePos = coords;
+            
+            let button = 'left';
+            if (e.button === 1) button = 'middle';
+            if (e.button === 2) button = 'right';
+            
+            sendCommand('mouse_click', {
+                x: coords.x,
+                y: coords.y,
+                button: button
+            });
+        });
+
+        canvas.addEventListener('mouseup', function(e) {
+            e.preventDefault();
+            isMouseDown = false;
+        });
+
+        canvas.addEventListener('mousemove', function(e) {
+            e.preventDefault();
+            let coords = getCanvasCoordinates(e);
+            
+            // Only send mouse move if position changed significantly (reduce spam)
+            if (Math.abs(coords.x - lastMousePos.x) > 1 || Math.abs(coords.y - lastMousePos.y) > 1) {
+                sendCommand('mouse_move', {
+                    x: coords.x,
+                    y: coords.y
+                });
+                lastMousePos = coords;
+            }
+            
+            // If dragging, send drag command
+            if (isMouseDown) {
+                sendCommand('mouse_drag', {
+                    x: coords.x,
+                    y: coords.y
+                });
+            }
+        });
+
+        // Double-click handling
+        canvas.addEventListener('dblclick', function(e) {
+            e.preventDefault();
+            let coords = getCanvasCoordinates(e);
+            
+            let button = 'left';
+            if (e.button === 1) button = 'middle';
+            if (e.button === 2) button = 'right';
+            
+            sendCommand('combo_click', {
+                x: coords.x,
+                y: coords.y,
+                button: button,
+                clicks: 2
+            });
+        });
+
+        // Right-click context menu prevention and handling
+        canvas.addEventListener('contextmenu', function(e) {
+            e.preventDefault();
+            return false;
+        });
+
+        // Enhanced mouse wheel scrolling matching InputCommands.scroll
+        canvas.addEventListener('wheel', function(e) {
+            e.preventDefault();
+            
+            let coords = getCanvasCoordinates(e);
+            let direction = e.deltaY > 0 ? 'down' : 'up';
+            let clicks = Math.max(1, Math.abs(Math.round(e.deltaY / 100)));
+            
+            sendCommand('mouse_scroll', {
+                x: coords.x,
+                y: coords.y,
+                direction: direction,
+                clicks: clicks
+            });
+        });
+
+        // Enhanced Keyboard Events matching InputCommands structure
+        document.addEventListener('keydown', function(e) {
+            // Don't capture keys when typing in input fields
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+                return;
+            }
+            
+            e.preventDefault();
+            
+            // Handle special key combinations for InputCommands.key_combo
+            if (e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) {
+                let keys = [];
+                if (e.ctrlKey) keys.push('ctrl');
+                if (e.altKey) keys.push('alt');
+                if (e.shiftKey) keys.push('shift');
+                if (e.metaKey) keys.push('cmd');
+                
+                // Add the main key
+                let mainKey = e.key;
+                if (e.key.length === 1) {
+                    mainKey = e.key.toLowerCase();
+                }
+                keys.push(mainKey);
+                
+                sendCommand('key_combo', {
+                    keys: keys
+                });
+            } else {
+                // Regular key press for InputCommands.press_key
+                sendCommand('key_press', {
+                    key: e.key
+                });
+            }
+        });
+
+        // Enhanced keyboard input field handler
+        document.getElementById('keyboard-input').addEventListener('input', function(e) {
+            let text = e.target.value;
+            if (text.length > 0) {
+                sendCommand('type_text', {
+                    text: text
+                });
+                e.target.value = ''; // Clear after sending
+            }
+        });
+
+        // System command functions
+        function sendScreenshot() {
+            sendCommand('screenshot', {
+                quality: currentQuality
+            });
+        }
+
+        function sendPing() {
+            sendCommand('ping', {});
+        }
+
+        function getScreenSize() {
+            sendCommand('get_screen_size', {});
+        }
+
+        // Remote control specific functions
+        function sendInput(inputData) {
+            sendCommand('send_input', {
+                input: inputData
+            });
+        }
+
+        function stopRemoteControl() {
+            sendCommand('stop_remote_control', {
+                controllerId: 'frontend_' + Date.now()
+            });
+        }
+
+        // Enhanced special key functions matching InputCommands
+        function sendSpecialKey(key) {
+            sendCommand('key_press', {
+                key: key
+            });
+        }
+
+        function sendKeyCombo(keys) {
+            sendCommand('key_combo', {
+                keys: keys
+            });
+        }
+
+        // Focus handling to capture keyboard events
+        canvas.addEventListener('click', function() {
+            canvas.focus();
+        });
+
+        // Make canvas focusable
+        canvas.setAttribute('tabindex', '0');
+        
+        // Add keyboard shortcut for full screen
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'F11' && e.target === canvas) {
+                e.preventDefault();
+                if (canvas.requestFullscreen) {
+                    canvas.requestFullscreen();
+                }
+            }
+        });
+
+        // Handle window resize
+        window.addEventListener('resize', function() {
+            // Maintain aspect ratio if needed
+            // This can be customized based on requirements
+        });
+    </script>
+</body>
+</html>

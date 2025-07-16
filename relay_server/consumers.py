@@ -105,7 +105,9 @@ class NodeConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps(command)) 
         logger.info(f"Command sent to node {self.node_id} Req ID: {request_id}")
 
-    async def receive(self, text_data):
+    async def receive(self, text_data=None, bytes_data=None):
+        if text_data is None:
+            return
         try:
             message = json.loads(text_data)
             msg_type = message.get('type')
@@ -151,6 +153,25 @@ class NodeConsumer(AsyncWebsocketConsumer):
                 }
                 req_resp.setdefault((self.node_id, request_id), []).append(response_payload)
                 logger.info(f"File upload status updated in req_resp for Req ID: {request_id}.")
+
+            elif msg_type == 'image_frame':
+                frame_data_base64 = message.get("frame_data")
+                if not frame_data_base64:
+                    logger.warning(f"Missing frame_data in image_frame from node {self.node_id}")
+                    return
+
+                if self.node_id in node_connections and node_connections[self.node_id]:
+                    controller_channel = node_connections[self.node_id]
+                    try:
+                        import base64
+                        binary_data = base64.b64decode(frame_data_base64)
+                        await controller_channel.send(bytes_data=binary_data)
+                        logger.info(f"Forwarded image_frame from node {self.node_id} to controller.")
+                    except Exception as e:
+                        logger.exception(f"Failed to forward image_frame from {self.node_id}: {e}")
+                else:
+                    logger.warning(f"No controller attached to node {self.node_id}; dropped image_frame.")
+
 
             else:
                 logger.warning(f"Unknown message type: {msg_type}")

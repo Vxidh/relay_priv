@@ -1,0 +1,1 @@
+Internal tool developed for Qsome.ai in the summer of '25.

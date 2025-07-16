@@ -3,11 +3,11 @@
 import logging
 import traceback
 
-# Import the command classes from their respective modules
 from .input import InputCommands
 from .system import SystemCommands
 from .email import EmailCommands
 from .api import APICallCommands
+from .remote_control import RemoteControlCommands
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ class CommandDispatcher:
         self.system_cmds = SystemCommands(node_client_ref=self.node_client_ref)
         self.email_cmds = EmailCommands(node_client_ref=self.node_client_ref) # Pass ref if email commands ever need to send responses
         self.api_cmds = APICallCommands(node_client_ref=self.node_client_ref) # Pass ref if API commands ever need to send responses
+        self.remote_control_cmds = RemoteControlCommands(node_client_ref=self.node_client_ref)
 
         # Map command types (from incoming JSON) to their specific handler methods
         # Ensure that ALL these mapped methods now expect a single 'params' dictionary as their argument.
@@ -56,7 +57,7 @@ class CommandDispatcher:
             'activate_window': self.system_cmds.activate_window,
             'wait': self.system_cmds.wait,
             'get_file': self.system_cmds.get_file, 
-            
+
             # Email commands
             'send_email': self.email_cmds.send_email,
             'read_latest_email': self.email_cmds.read_latest_email,
@@ -64,6 +65,11 @@ class CommandDispatcher:
             # Local API Call Commands
             'get_data_from_local_api': self.api_cmds.get_data_from_local_api,
             'post_data_to_local_api': self.api_cmds.post_data_to_local_api, 
+
+            # Remote control commands
+            'start_remote_control': self.remote_control_cmds.start_remote_control,
+            'stop_remote_control': self.remote_control_cmds.stop_remote_control,
+            'send_input': self.remote_control_cmds.send_input,
         }
 
     def execute_command(self, command_data):

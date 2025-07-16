@@ -16,6 +16,29 @@ from commands import CommandDispatcher # Assuming commands.py is where CommandDi
 logger = logging.getLogger('NodeClient')
 
 class NodeClient:
+
+    def connect_image_stream(self):
+        try:
+            image_url = f"{self.server_url_base}/ws/remote-control/image/{self.node_id}/"
+            headers = [f"Authorization: Bearer {self.access_token}"] if self.access_token else []
+            
+            self.image_ws = websocket.create_connection(image_url, header=headers)
+            logger.info(f"NodeClient: Connected to image stream WebSocket at {image_url}.")
+        except Exception as e:
+            logger.exception(f"NodeClient: Failed to connect to image stream WebSocket: {e}")
+            self.image_ws = None
+
+
+    def send_image_frame(self, img_bytes):
+        try:
+            if self.image_ws:
+                self.image_ws.send(img_bytes, opcode=websocket.ABNF.OPCODE_BINARY)
+                logger.info(f"NodeClient: Sent image frame ({len(img_bytes)} bytes) to image stream.")
+            else:
+                logger.warning("NodeClient: Image WebSocket not connected. Cannot send image frame.")
+        except Exception as e:
+            logger.exception(f"NodeClient: Error sending image frame: {e}")
+
     def __init__(self, server_url, node_id, access_token, download_dir, initial_metadata=None, on_node_id_invalid=None):
         self.server_url = server_url
         self.node_id = node_id
@@ -26,7 +49,7 @@ class NodeClient:
         self.ws = None
         self.running = False
         self.current_task_state = {}
-
+        self.image_ws = None  # Dedicated WebSocket for image streaming
         # Ensure CommandDispatcher is initialized with a reference to this NodeClient
         self.dispatcher = CommandDispatcher(node_client_ref=self)
 
@@ -123,6 +146,9 @@ class NodeClient:
         self._connected_event.set()
         self.running = True # Ensure running is True when connection opens
         self._start_threads() # Start worker threads after connection is open
+        # Connect to the image stream socket
+        self.connect_image_stream()
+
         initial_request_id = str(uuid.uuid4())
         # Send initial node metadata message
         # The 'type' is now 'node_metadata' and node_id is at the top level
@@ -319,6 +345,7 @@ class NodeClient:
             logger.warning("NodeClient: No access token provided for WebSocket connection. Connection might fail due to lack of authentication.")
 
         websocket.enableTrace(False)
+        self.server_url_base = self.server_url.split("/ws/")[0]
         self.ws = websocket.WebSocketApp(
             self.server_url,
             header=headers,

@@ -4,14 +4,10 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# 🚨 IMPORTANT: Change this in a production environment!
-SECRET_KEY = 'django-insecure-m+a668t=3e=7c*b6k0y%3d6k^r4r6z(e(e9h4^@l6!a5+m^o_o' # Example, REPLACE THIS!
 
-# 🚨 IMPORTANT: Set to False in production. 
-DEBUG = True # <<< CRITICAL: Set to True for development static files & error details
-
-# 🚨 IMPORTANT: Add your server's domain names or IPs in production.
-ALLOWED_HOSTS = ['localhost', '127.0.0.1'] 
+SECRET_KEY = 'django-insecure-m+a668t=3e=7c*b6k0y%3d6k^r4r6z(e(e9h4^@l6!a5+m^o_o' # Change this in production!
+DEBUG = True # Set to False in production
+ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -20,8 +16,9 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'channels', 
+    'channels',
     'relay_server',
+    'remote_control_app',
     'oauth2_provider',
     'rest_framework',
 ]
@@ -41,8 +38,8 @@ ROOT_URLCONF = 'rpa_relay_server_project.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [], # This should be empty for a clean standalone project setup
-        'APP_DIRS': True, # This allows Django to find templates inside your 'templates' folder within each app
+        'DIRS': [],
+        'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
                 'django.template.context_processors.debug',
@@ -70,35 +67,30 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = '/static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles' # Directory where collected static files will be stored
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 OAUTH2_PROVIDER_APPLICATION_MODEL = 'oauth2_provider.Application'
-# --- Authentication Settings ---
-LOGIN_URL = '/admin/login/' # <<< Points to Django's built-in admin login page
-BATCH_SERVER_FILE_UPLOAD_URL = "http://your-batch-server:8001/api/file-receive/" # <--- IMPORTANT: Configure this
-BATCH_SERVER_API_KEY = "your_super_secret_batch_server_key" # <--- IMPORTANT: Configure this for internal authentication
-BATCH_SERVER_URL = "http://localhost:8080"  # Set to your batch server's address
+LOGIN_URL = '/admin/login/'
+BATCH_SERVER_FILE_UPLOAD_URL = "http://your-batch-server:8001/api/file-receive/"
+BATCH_SERVER_API_KEY = "your_super_secret_batch_server_key"
+BATCH_SERVER_URL = "http://localhost:8080"
 
 
 
-# NEW: Add OAuth2Backend for Django OAuth Toolkit authentication
 AUTHENTICATION_BACKENDS = (
     'oauth2_provider.backends.OAuth2Backend', # For authenticating with OAuth2 tokens
     'django.contrib.auth.backends.ModelBackend', # Django's default for username/password
 )
 
-# NEW: Django REST Framework settings for OAuth2 authentication
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
-        #'rest_framework.authentication.SessionAuthentication', # Optional: for browsable API/admin login
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated', # Require authentication by default
     ),
 }
 
-# NEW: Django OAuth Toolkit settings
 OAUTH2_PROVIDER = {
     # These are default scopes. You can define custom scopes as needed.
     # The 'read' and 'write' are common. For RPA nodes, you might need more specific scopes.
@@ -110,9 +102,6 @@ OAUTH2_PROVIDER = {
         'rpa:register': 'Allows a new RPA node to register and get tokens',
         # Add more granular scopes as your application grows
     },
-    # Set the default expiry for access tokens (in seconds). Default is 3600 (1 hour).
-    # Consider longer expiry for RPA nodes if they are expected to run for extended periods
-    # without frequent re-authentication, but always use refresh tokens for long-lived access.
     'ACCESS_TOKEN_EXPIRE_SECONDS': 3600 * 24 * 30, # Example: 30 days expiry for access tokens
     'REFRESH_TOKEN_EXPIRE_SECONDS': 3600 * 24 * 365, # Example: 1 year expiry for refresh tokens
     # Using 'authorization-code' means the default grant types are available.
@@ -122,15 +111,12 @@ OAUTH2_PROVIDER = {
     'PKCE_REQUIRED': True, # Enforce PKCE for public clients (recommended for security)
 }
 
-
 CHANNEL_LAYERS = {
-    # For local development without Redis, you can uncomment this in-memory layer:
-    "default": { 
-        "BACKEND": "channels.layers.InMemoryChannelLayer",
+    'default': {
+        'BACKEND': 'channels.layers.InMemoryChannelLayer',
     },
 }
 
-# --- LOGGING CONFIGURATION (UPDATED for file logging with levels) ---
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -150,7 +136,7 @@ LOGGING = {
             'level': 'DEBUG',
             'class': 'logging.handlers.RotatingFileHandler',
             'filename': BASE_DIR / 'logs' / 'relay_server.log',
-            'maxBytes': 1024 * 1024 * 5,  # 5 MB
+            'maxBytes': 1024 * 1024 * 5,
             'backupCount': 3,
             'formatter': 'standard',
         },

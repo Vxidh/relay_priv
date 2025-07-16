@@ -7,13 +7,19 @@ from django.core.asgi import get_asgi_application
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'rpa_relay_server_project.settings')
 django.setup()
 
-# Now, import your root WebSocket URL routing after Django settings are configured
-from relay_server.routing import websocket_urlpatterns
+
+# Import websocket_urlpatterns from both relay_server and remote_control_app
+from relay_server.routing import websocket_urlpatterns as relay_ws_urlpatterns
+from remote_control_app.routing import websocket_urlpatterns as remote_ws_urlpatterns
 from relay_server.auth_middleware import TokenAuthMiddleware
 
+all_websocket_urlpatterns = relay_ws_urlpatterns + remote_ws_urlpatterns
+
 application = ProtocolTypeRouter({
-    "http": get_asgi_application(),  # Handles standard HTTP requests
+    "http": get_asgi_application(),
     "websocket": TokenAuthMiddleware(
-        URLRouter(websocket_urlpatterns)
+        AuthMiddlewareStack(
+            URLRouter(all_websocket_urlpatterns)
+        )
     ),
 })
