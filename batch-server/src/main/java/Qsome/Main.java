@@ -25,8 +25,8 @@ public class Main {
     private static final String ORCHESTRATOR_DOWNLOAD_DIR = "orchestrator_downloads";
 
     // IMPORTANT: Replace with your actual Client ID and Client Secret from Django Admin
-    private static final String OAUTH2_CLIENT_ID = "gdZJD364f5Rr32Z2HlePm5vZZGpYcuGQ3htOryGa"; 
-    private static final String OAUTH2_CLIENT_SECRET = "Xfhu8jVcC6nSsSqMHBwI9RPK462ePyYLmPL0MmDQdADOzVxqxSSmriCqwHmV0tOWSVXMg86joNsPTn4BypLlW5YXb79NXIu6ZmKa6IktyRM5mxlOzqBCBsbNvzxbI7w6"; 
+    private static final String OAUTH2_CLIENT_ID = ""; 
+    private static final String OAUTH2_CLIENT_SECRET = ""; 
 
     private static Node rpaOrchestratorNode; 
 
